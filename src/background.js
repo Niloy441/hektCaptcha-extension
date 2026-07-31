@@ -1,72 +1,181 @@
-'use strict';
+// ============================================
+// hektCaptcha Solver - Background Service Worker
+// ============================================
 
-// With background scripts you can communicate with popup
-// and contentScript files.
-// For more information on background script,
-// See https://developer.chrome.com/extensions/background_pages
+const GITHUB_OWNER = "Niloy441";  // তোমার GitHub username
+const GITHUB_REPO = "hektCaptcha-extension";  // তোমার repo name
+const UPDATE_CHECK_INTERVAL_MINUTES = 60; // প্রতি ঘন্টায় চেক
 
-// Setup settings
-const defaultSettings = {
-  hcaptcha_auto_open: true,
-  hcaptcha_auto_solve: true,
-  hcaptcha_click_delay_time: 300,
-  hcaptcha_solve_delay_time: 3000,
-  hcaptcha_reload_delay_time: 0,
+// --- Auto-Update System ---
+async function checkForUpdate(manual = false) {
+  try {
+    const currentVersion = chrome.runtime.getManifest().version;
+    const apiUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 
-  recaptcha_auto_open: false,
-  recaptcha_auto_solve: false,
-  recaptcha_click_delay_time: 300,
-  recaptcha_solve_delay_time: 1000,
-};
+    const response = await fetch(apiUrl, {
+      headers: {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': `hektCaptcha/${currentVersion}`
+      }
+    });
 
-chrome.runtime.onInstalled.addListener(async () => {
-  // Apply default settings if not set
-  for (const [key, value] of Object.entries(defaultSettings)) {
-    const storedValue = await chrome.storage.local.get(key);
-    console.log(storedValue);
-    if (storedValue[key] === undefined) {
-      await chrome.storage.local.set({ [key]: value });
+    if (!response.ok) {
+      if (response.status === 403) {
+        console.log('[hektCaptcha] GitHub API rate limit hit. Will retry later.');
+      } else {
+        console.error('[hektCaptcha] Update check failed:', response.status);
+      }
+      return { success: false, error: `HTTP ${response.status}` };
+    }
+
+    const release = await response.json();
+    const latestVersion = release.tag_name.replace(/^v/, '');
+
+    console.log(`[hektCaptcha] Current: ${currentVersion}, Latest: ${latestVersion}`);
+
+    if (isNewerVersion(latestVersion, currentVersion)) {
+      // নতুন ভার্সন পাওয়া গেছে!
+      const stored = await chrome.storage.local.get('dismissedVersion');
+      if (!manual && stored.dismissedVersion === latestVersion) {
+        return { success: true, hasUpdate: false, message: 'Update dismissed' };
+      }
+
+      // Notification দেখাও
+      await chrome.notifications.create('hektCaptcha-update', {
+        type: 'basic',
+        iconUrl: 'icons/icon128.png',
+        title: '🚀 hektCaptcha Update Available!',
+        message: `Version ${latestVersion} is now available. Click to download.`,
+        buttons: [
+          { title: '⬇️ Download Update' },
+          { title: '❌ Dismiss' }
+        ],
+        priority: 2,
+        requireInteraction: true
+      });
+
+      // Store update info
+      await chrome.storage.local.set({
+        latestVersion: latestVersion,
+        releaseUrl: release.html_url,
+        releaseNotes: release.body || '',
+        publishedAt: release.published_at
+      });
+
+      // Badge দেখাও
+      await chrome.action.setBadgeText({ text: 'NEW' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#FF0000' });
+
+      return { success: true, hasUpdate: true, version: latestVersion, url: release.html_url };
+    } else {
+      // No update
+      await chrome.action.setBadgeText({ text: '' });
+      return { success: true, hasUpdate: false, message: 'You are up to date!' };
+    }
+  } catch (error) {
+    console.error('[hektCaptcha] Update check error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ভার্সন কম্পেয়ার করার ফাংশন
+function isNewerVersion(latest, current) {
+  const l = latest.split('.').map(Number);
+  const c = current.split('.').map(Number);
+  for (let i = 0; i < Math.max(l.length, c.length); i++) {
+    const lv = l[i] || 0;
+    const cv = c[i] || 0;
+    if (lv > cv) return true;
+    if (lv < cv) return false;
+  }
+  return false;
+}
+
+// --- Notification Button Handler ---
+chrome.notifications.onButtonClicked.addListener(async (notificationId, buttonIndex) => {
+  if (notificationId !== 'hektCaptcha-update') return;
+
+  const stored = await chrome.storage.local.get(['latestVersion', 'releaseUrl']);
+
+  if (buttonIndex === 0) {
+    // Download button
+    if (stored.releaseUrl) {
+      chrome.tabs.create({ url: stored.releaseUrl });
+    }
+  } else if (buttonIndex === 1) {
+    // Dismiss button
+    await chrome.storage.local.set({ dismissedVersion: stored.latestVersion });
+    await chrome.notifications.clear(notificationId);
+    await chrome.action.setBadgeText({ text: '' });
+  }
+});
+
+// Notification click handler (body click)
+chrome.notifications.onClicked.addListener(async (notificationId) => {
+  if (notificationId === 'hektCaptcha-update') {
+    const stored = await chrome.storage.local.get('releaseUrl');
+    if (stored.releaseUrl) {
+      chrome.tabs.create({ url: stored.releaseUrl });
     }
   }
+});
 
-  // Open setup page, if mozilla and permission is not granted
-  const isMozilla = chrome.runtime.getURL('').startsWith('moz');
-  const permissionGranted = await chrome.permissions.contains({
-    origins: [
-      '<all_urls>',
-      '*://hekt-static.akmal.dev/*',
-      '*://*.hcaptcha.com/captcha/*',
-      '*://*.google.com/recaptcha/*',
-      '*://*.recaptcha.net/recaptcha/*',
-    ],
+// --- Alarms Setup ---
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'hektCaptcha-update-check') {
+    checkForUpdate(false);
+  }
+});
+
+// --- Install/Startup ---
+chrome.runtime.onInstalled.addListener(async (details) => {
+  console.log('[hektCaptcha] Extension installed/updated:', details.reason);
+
+  // Default settings
+  await chrome.storage.sync.set({
+    autoSolve: true,
+    autoSubmit: false,
+    debugMode: false,
+    customCaptchaSelector: ''
   });
 
-  if (isMozilla && !permissionGranted) {
-    chrome.tabs.create({
-      url: chrome.runtime.getURL('setup.html'),
+  // First update check after 5 minutes
+  chrome.alarms.create('hektCaptcha-update-check', {
+    delayInMinutes: 5,
+    periodInMinutes: UPDATE_CHECK_INTERVAL_MINUTES
+  });
+
+  // Immediate check
+  checkForUpdate(false);
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[hektCaptcha] Extension started');
+  checkForUpdate(false);
+});
+
+// --- Message Handler (from popup/content) ---
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'CHECK_UPDATE') {
+    checkForUpdate(true).then(result => {
+      sendResponse(result);
     });
+    return true; // Async response
+  }
+
+  if (message.type === 'GET_UPDATE_INFO') {
+    chrome.storage.local.get(['latestVersion', 'releaseUrl', 'releaseNotes', 'publishedAt'])
+      .then(data => sendResponse(data));
+    return true;
+  }
+
+  if (message.type === 'DISMISS_UPDATE') {
+    chrome.storage.local.set({ dismissedVersion: message.version }).then(() => {
+      chrome.action.setBadgeText({ text: '' });
+      sendResponse({ success: true });
+    });
+    return true;
   }
 });
 
-const kvStorage = {};
-chrome.runtime.onMessage.addListener(function (
-  { type, label },
-  sender,
-  sendResponse
-) {
-  (async () => {
-    if (type === 'KV_SET') {
-      if (label.tab_specific) {
-        label.key = `${sender.tab.id}_${label.key}`;
-      }
-      kvStorage[label.key] = label.value;
-      sendResponse({ status: 'success' });
-    } else if (type === 'KV_GET') {
-      if (label.tab_specific) {
-        label.key = `${sender.tab.id}_${label.key}`;
-      }
-      sendResponse({ status: 'success', value: kvStorage[label.key] });
-    }
-  })();
-  return true;
-});
+console.log('[hektCaptcha] Background service worker loaded');
