@@ -1,42 +1,46 @@
-// This code comes from SponsorBlock by Ajay Ramachandran
-// https://github.com/ajayyy/SponsorBlock/blob/fea33945c7ce7da71cf93cb166de55a0efa2711f/webpack/webpack.manifest.js
-// License: LGPL-3.0
-
-const path = require('path');
-const { validate } = require('schema-utils');
-const fs = require('fs');
-
-const PATHS = require('./paths');
-const manifestChrome = require('../public/manifest.json');
-const manifestFirefox = require('../public/manifest.firefox.json');
-
-// schema for options object
-const schema = {
-  type: 'object',
-  properties: {
-    browser: {
-      type: 'string',
-    },
+{
+  "manifest_version": 3,
+  "name": "hektCaptcha Solver",
+  "version": "1.0.0",
+  "description": "Automatically solve hCaptcha using AI. With lifetime auto-update.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "alarms",
+    "notifications",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
   },
-};
-
-class ManifestPlugin {
-  constructor(options = {}) {
-    validate(schema, options, 'Build Manifest Plugin');
-
-    this.options = options;
-  }
-
-  apply() {
-    const distManifestFile = path.resolve(PATHS.build, 'manifest.json');
-
-    fs.mkdirSync(PATHS.build, { recursive: true });
-    if (this.options.browser.toLowerCase() === 'chrome') {
-      fs.writeFileSync(distManifestFile, JSON.stringify(manifestChrome));
-    } else if (this.options.browser.toLowerCase() === 'firefox') {
-      fs.writeFileSync(distManifestFile, JSON.stringify(manifestFirefox));
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end",
+      "all_frames": true
     }
-  }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }
-
-module.exports = ManifestPlugin;
